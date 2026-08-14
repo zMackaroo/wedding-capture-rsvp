@@ -4,11 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n web,api -c cyan,magenta \"vite --host\" \"npm run dev --prefix api\"",
+    "dev": "concurrently -k -n web,api -c cyan,magenta \"vite --host\" \"npm run dev --prefix ../capture-api\"",
     "dev:web": "vite --host",
-    "dev:api": "npm run dev --prefix api",
+    "dev:api": "npm run dev --prefix ../capture-api",
     "build": "tsc -b && vite build",
-    "start:api": "npm start --prefix api",
+    "start:api": "npm start --prefix ../capture-api",
     "lint": "eslint .",
     "preview": "vite preview"
   },

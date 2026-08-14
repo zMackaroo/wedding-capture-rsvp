@@ -12,9 +12,7 @@ dist
 dist-ssr
 *.local
 .env
-api/.env
 service-account.json
-api/service-account.json
 secrets/
 
 # Editor directories and files
