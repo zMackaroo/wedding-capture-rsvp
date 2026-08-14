@@ -1,0 +1,52 @@
+:root {
+  --ink: #161616;
+  --muted: #6a6a6a;
+  --paper: #e6ebed;
+  --sand: #ece8e4;
+  --rule: #161616;
+  --script: 'Allura', 'Great Vibes', cursive;
+  --serif: 'Cormorant Garamond', 'Palatino', serif;
+  --display: 'Playfair Display', 'Cormorant Garamond', serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--serif);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+img {
+  max-width: 100%;
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
