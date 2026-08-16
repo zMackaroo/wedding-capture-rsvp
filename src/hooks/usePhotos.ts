@@ -1,18 +1,39 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiUrl, mediaUrl } from '../lib/api'
+import { kindFromMime, selectUploadBatch, type MediaKind } from '../lib/media'
+import {
+  cancel,
+  enqueue,
+  MAX_UPLOAD_ATTEMPTS,
+  pendingSnapshot,
+  restoreQueue,
+  retryNow,
+  subscribe,
+  type ApiPhoto,
+} from '../lib/uploadQueue'
+
+export type PhotoStatus = 'queued' | 'uploading' | 'retrying' | 'ready' | 'error'
 
 export type Photo = {
   id: string
   url: string
-  status: 'uploading' | 'ready' | 'error'
+  kind: MediaKind
+  status: PhotoStatus
+  progress?: number
+  error?: string
+}
+
+export type QueueSummary = {
+  pending: number
+  uploading: number
+  queued: number
+  retrying: number
+  online: boolean
 }
 
 type AlbumState = 'loading' | 'ready' | 'error'
 
-type ApiPhoto = {
-  id: string
-  url: string
-}
+const POLL_MS = 12_000
 
 async function compressImage(file: File) {
   if (!file.type.startsWith('image/') || file.type === 'image/gif') return file
@@ -49,99 +70,181 @@ async function readApiError(response: Response, fallback: string) {
   }
 }
 
+function mergeRemote(local: Photo[], remote: ApiPhoto[]): Photo[] {
+  const inflight = local.filter((photo) => photo.status !== 'ready')
+  const inflightIds = new Set(inflight.map((photo) => photo.id))
+  const remoteReady = remote
+    .filter((photo) => !inflightIds.has(photo.id))
+    .map((photo) => ({
+      id: photo.id,
+      url: mediaUrl(photo.url),
+      kind: photo.kind ?? kindFromMime(photo.mimeType),
+      status: 'ready' as const,
+    }))
+  return [...inflight, ...remoteReady]
+}
+
 export function usePhotos() {
   const [photos, setPhotos] = useState<Photo[]>([])
   const [albumState, setAlbumState] = useState<AlbumState>('loading')
   const [albumError, setAlbumError] = useState<string | null>(null)
+  const [online, setOnline] = useState(
+    () => (typeof navigator === 'undefined' ? true : navigator.onLine),
+  )
+  const [limitNotice, setLimitNotice] = useState<string | null>(null)
+  const didLoad = useRef(false)
 
-  useEffect(() => {
-    let cancelled = false
-
-    fetch(apiUrl('/api/photos'))
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(await readApiError(response, 'Could not load the album'))
-        }
-        return response.json() as Promise<{ photos: ApiPhoto[] }>
+  const refreshAlbum = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch(apiUrl('/api/photos'), {
+        signal,
+        cache: 'no-store',
       })
-      .then((data) => {
-        if (cancelled) return
-        setPhotos(
-          data.photos.map((photo) => ({
-            id: photo.id,
-            url: mediaUrl(photo.url),
-            status: 'ready',
-          })),
-        )
-        setAlbumError(null)
-        setAlbumState('ready')
-      })
-      .catch((error: unknown) => {
-        if (cancelled) return
-        setAlbumState('error')
-        setAlbumError(
-          error instanceof Error ? error.message : 'Could not load the album',
-        )
-      })
-
-    return () => {
-      cancelled = true
+      if (!response.ok) {
+        throw new Error(await readApiError(response, 'Could not load the album'))
+      }
+      const data = (await response.json()) as { photos: ApiPhoto[] }
+      didLoad.current = true
+      setPhotos((current) => mergeRemote(current, data.photos))
+      setAlbumError(null)
+      setAlbumState('ready')
+    } catch (error: unknown) {
+      if (signal?.aborted) return
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      if (didLoad.current) return
+      setAlbumState('error')
+      setAlbumError(
+        error instanceof Error ? error.message : 'Could not load the album',
+      )
     }
   }, [])
 
-  const addFiles = useCallback(async (fileList: FileList | File[]) => {
-    const files = Array.from(fileList).filter((file) =>
-      file.type.startsWith('image/'),
-    )
-    if (files.length === 0) return
-
-    const pending = files.map((file) => {
-      const url = URL.createObjectURL(file)
-      return {
-        id: crypto.randomUUID(),
-        url,
-        status: 'uploading' as const,
-        file,
+  useEffect(() => {
+    const unsubscribe = subscribe((event) => {
+      if (event.type === 'online') {
+        setOnline(event.online)
+        return
       }
-    })
 
-    setPhotos((current) => [
-      ...pending.map(({ id, url, status }) => ({ id, url, status })),
-      ...current,
-    ])
-    setAlbumState('ready')
-
-    for (const item of pending) {
-      const body = new FormData()
-      body.append('photos', await compressImage(item.file))
-
-      try {
-        const response = await fetch(apiUrl('/api/photos'), {
-          method: 'POST',
-          body,
-        })
-        if (!response.ok) {
-          throw new Error(await readApiError(response, 'Could not save photo'))
-        }
-        const data = (await response.json()) as { photos: ApiPhoto[] }
-        const uploaded = data.photos[0]
-        if (!uploaded) throw new Error('Could not save photo')
-
-        URL.revokeObjectURL(item.url)
+      if (event.type === 'status') {
         setPhotos((current) =>
           current.map((photo) =>
-            photo.id === item.id
-              ? { id: uploaded.id, url: mediaUrl(uploaded.url), status: 'ready' }
+            photo.id === event.id
+              ? {
+                  ...photo,
+                  status: event.status,
+                  progress: event.progress ?? photo.progress,
+                  error: undefined,
+                }
               : photo,
           ),
         )
-      } catch {
+        return
+      }
+
+      if (event.type === 'error') {
         setPhotos((current) =>
           current.map((photo) =>
-            photo.id === item.id ? { ...photo, status: 'error' } : photo,
+            photo.id === event.id
+              ? { ...photo, status: 'error', error: event.message }
+              : photo,
           ),
         )
+        return
       }
+
+      setPhotos((current) => {
+        const match = current.find((photo) => photo.id === event.id)
+        if (match?.url.startsWith('blob:')) URL.revokeObjectURL(match.url)
+        return current.flatMap((photo) => {
+          if (photo.id === event.photo.id) return []
+          if (photo.id !== event.id) return [photo]
+          return [
+            {
+              id: event.photo.id,
+              url: mediaUrl(event.photo.url),
+              kind: event.photo.kind ?? kindFromMime(event.photo.mimeType),
+              status: 'ready' as const,
+            },
+          ]
+        })
+      })
+    })
+
+    let cancelled = false
+    const controller = new AbortController()
+
+    void (async () => {
+      await restoreQueue()
+      if (cancelled) return
+
+      const pending = pendingSnapshot()
+      if (pending.length > 0) {
+        setPhotos((current) => {
+          const byId = new Map(current.map((photo) => [photo.id, photo]))
+          const pendingPhotos = pending.map((item) => {
+            const existing = byId.get(item.id)
+            if (existing) return existing
+            return {
+              id: item.id,
+              url: URL.createObjectURL(item.file),
+              kind: kindFromMime(item.file.type, item.file.name),
+              status: (item.attempts >= MAX_UPLOAD_ATTEMPTS
+                ? 'error'
+                : item.attempts > 0
+                  ? 'retrying'
+                  : 'queued') as PhotoStatus,
+            }
+          })
+          const pendingIds = new Set(pending.map((item) => item.id))
+          return [...pendingPhotos, ...current.filter((photo) => !pendingIds.has(photo.id))]
+        })
+        setAlbumState('ready')
+      }
+
+      await refreshAlbum(controller.signal)
+    })()
+
+    const poll = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      void refreshAlbum()
+    }, POLL_MS)
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshAlbum()
+    }
+
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      unsubscribe()
+      window.clearInterval(poll)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [refreshAlbum])
+
+  const addFiles = useCallback(async (fileList: FileList | File[]) => {
+    const { accepted, notice } = selectUploadBatch(Array.from(fileList))
+    setLimitNotice(notice)
+    if (accepted.length === 0) return
+    setAlbumState('ready')
+
+    for (const file of accepted) {
+      const readyFile = file.type.startsWith('video/') ? file : await compressImage(file)
+      const id = crypto.randomUUID()
+      const url = URL.createObjectURL(readyFile)
+      setPhotos((current) => [
+        {
+          id,
+          url,
+          kind: kindFromMime(readyFile.type, readyFile.name),
+          status: 'queued',
+        },
+        ...current,
+      ])
+      void enqueue(id, readyFile)
     }
   }, [])
 
@@ -151,7 +254,39 @@ export function usePhotos() {
       if (match?.url.startsWith('blob:')) URL.revokeObjectURL(match.url)
       return current.filter((photo) => photo.id !== id)
     })
+    void cancel(id)
   }, [])
 
-  return { photos, addFiles, dismissPhoto, albumState, albumError }
+  const retryPhoto = useCallback((id: string) => {
+    setPhotos((current) =>
+      current.map((photo) =>
+        photo.id === id
+          ? { ...photo, status: 'queued', progress: 0, error: undefined }
+          : photo,
+      ),
+    )
+    void retryNow(id)
+  }, [])
+
+  const queue = useMemo<QueueSummary>(() => {
+    const pendingPhotos = photos.filter((photo) => photo.status !== 'ready')
+    return {
+      pending: pendingPhotos.length,
+      uploading: pendingPhotos.filter((photo) => photo.status === 'uploading').length,
+      queued: pendingPhotos.filter((photo) => photo.status === 'queued').length,
+      retrying: pendingPhotos.filter((photo) => photo.status === 'retrying').length,
+      online,
+    }
+  }, [photos, online])
+
+  return {
+    photos,
+    addFiles,
+    dismissPhoto,
+    retryPhoto,
+    albumState,
+    albumError,
+    queue,
+    limitNotice,
+  }
 }

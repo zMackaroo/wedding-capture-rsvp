@@ -1,54 +1,87 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from 'react'
-import type { Photo } from '../hooks/usePhotos'
+import {
+  useCallback,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
+import { PhotoCard } from "../components/PhotoCard";
+import { PhotoLightbox } from "../components/PhotoLightbox";
+import type { Photo, QueueSummary } from "../hooks/usePhotos";
 
 type UploadPageProps = {
-  photos: Photo[]
-  albumState: 'loading' | 'ready' | 'error'
-  albumError: string | null
-  onAddFiles: (files: FileList | File[]) => void
-  onDismiss: (id: string) => void
+  photos: Photo[];
+  albumState: "loading" | "ready" | "error";
+  albumError: string | null;
+  queue: QueueSummary;
+  limitNotice: string | null;
+  onAddFiles: (files: FileList | File[]) => void;
+  onDismiss: (id: string) => void;
+  onRetry: (id: string) => void;
+};
+
+function queueCopy(queue: QueueSummary) {
+  if (queue.pending === 0) return null;
+  const count = queue.pending;
+  const noun = count === 1 ? "photo" : "photos";
+  if (!queue.online) {
+    return `You're offline. ${count} ${noun} will save when you're back.`;
+  }
+  if (queue.retrying > 0) {
+    return `Waiting to retry ${queue.retrying} ${queue.retrying === 1 ? "photo" : "photos"}…`;
+  }
+  if (queue.uploading > 0) {
+    return `Saving ${queue.uploading} of ${count}…`;
+  }
+  return `${count} ${noun} waiting to save`;
 }
 
 export function UploadPage({
   photos,
   albumState,
   albumError,
+  queue,
+  limitNotice,
   onAddFiles,
   onDismiss,
+  onRetry,
 }: UploadPageProps) {
-  const libraryRef = useRef<HTMLInputElement>(null)
-  const cameraRef = useRef<HTMLInputElement>(null)
-  const [dragging, setDragging] = useState(false)
+  const libraryRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [viewer, setViewer] = useState<Photo | null>(null);
+  const note = queueCopy(queue);
+  const closeViewer = useCallback(() => setViewer(null), []);
 
   const handleFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files) onAddFiles(event.target.files)
-    event.target.value = ''
-  }
+    if (event.target.files) onAddFiles(event.target.files);
+    event.target.value = "";
+  };
 
   const onDragOver = (event: DragEvent) => {
-    event.preventDefault()
-    setDragging(true)
-  }
+    event.preventDefault();
+    setDragging(true);
+  };
 
-  const onDragLeave = () => setDragging(false)
+  const onDragLeave = () => setDragging(false);
 
   const onDrop = (event: DragEvent) => {
-    event.preventDefault()
-    setDragging(false)
-    if (event.dataTransfer.files.length) onAddFiles(event.dataTransfer.files)
-  }
+    event.preventDefault();
+    setDragging(false);
+    if (event.dataTransfer.files.length) onAddFiles(event.dataTransfer.files);
+  };
 
   return (
     <section className="page album" id="album" aria-label="Photo album">
       <header className="album-header">
         <p className="album-kicker">Christian and Franhess</p>
         <h2 className="album-title">Our Album</h2>
-        <p className="album-lede">Share your photos from the day</p>
+        <p className="album-lede">Share photos and videos from the day</p>
       </header>
 
       <div className="album-body">
         <div
-          className={`dropzone${dragging ? ' is-dragging' : ''}`}
+          className={`dropzone${dragging ? " is-dragging" : ""}`}
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
@@ -57,7 +90,7 @@ export function UploadPage({
             ref={libraryRef}
             className="sr-only"
             type="file"
-            accept="image/*"
+            accept="image/*,video/*"
             multiple
             onChange={handleFiles}
           />
@@ -65,12 +98,12 @@ export function UploadPage({
             ref={cameraRef}
             className="sr-only"
             type="file"
-            accept="image/*"
+            accept="image/*,video/*"
             capture="environment"
             onChange={handleFiles}
           />
 
-          <p className="dropzone-script">Add a photo</p>
+          <p className="dropzone-script">Add a photo or video</p>
           <p className="dropzone-hint">From your camera or library</p>
 
           <div className="dropzone-actions">
@@ -93,45 +126,56 @@ export function UploadPage({
           </div>
         </div>
 
+        {limitNotice ? (
+          <p className="queue-note" role="status">
+            {limitNotice}
+          </p>
+        ) : null}
+        {note ? (
+          <p className="queue-note" aria-live="polite">
+            {note}
+          </p>
+        ) : null}
+
         {photos.length > 0 ? (
-          <ul className="photo-grid" aria-label={`${photos.length} uploaded photos`}>
+          <ul
+            className="photo-grid"
+            aria-label={`${photos.length} uploaded photos`}
+          >
             {photos.map((photo) => (
-              <li
+              <PhotoCard
                 key={photo.id}
-                className={`photo-card${photo.status !== 'ready' ? ` is-${photo.status}` : ''}`}
-              >
-                <img src={photo.url} alt="Uploaded wedding photo" />
-                {photo.status === 'uploading' ? (
-                  <p className="photo-status">Saving</p>
-                ) : null}
-                {photo.status === 'error' ? (
-                  <>
-                    <p className="photo-status">Could not save</p>
-                    <button
-                      type="button"
-                      className="photo-remove"
-                      onClick={() => onDismiss(photo.id)}
-                      aria-label="Dismiss failed photo"
-                    >
-                      <CloseIcon />
-                    </button>
-                  </>
-                ) : null}
+                photo={photo}
+                onDismiss={onDismiss}
+                onRetry={onRetry}
+                onOpen={setViewer}
+              />
+            ))}
+          </ul>
+        ) : albumState === "loading" ? (
+          <ul
+            className="photo-grid"
+            aria-busy="true"
+            aria-label="Loading photographs"
+          >
+            {Array.from({ length: 4 }, (_, index) => (
+              <li key={index} className="photo-card is-skeleton">
+                <div className="photo-skeleton is-visible" />
               </li>
             ))}
           </ul>
         ) : (
           <p className="empty-copy">
-            {albumState === 'loading'
-              ? 'Loading photographs…'
-              : albumState === 'error'
-                ? albumError || 'Could not load the album.'
-                : 'No photographs yet.'}
+            {albumState === "error"
+              ? albumError || "Could not load the album."
+              : "No photographs yet."}
           </p>
         )}
       </div>
+
+      {viewer ? <PhotoLightbox photo={viewer} onClose={closeViewer} /> : null}
     </section>
-  )
+  );
 }
 
 function CameraIcon() {
@@ -152,7 +196,7 @@ function CameraIcon() {
         strokeWidth="1.25"
       />
     </svg>
-  )
+  );
 }
 
 function LibraryIcon() {
@@ -177,19 +221,5 @@ function LibraryIcon() {
       />
       <circle cx="9" cy="9.5" r="1.15" fill="currentColor" />
     </svg>
-  )
-}
-
-function CloseIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M7 7l10 10M17 7 7 17"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
+  );
 }

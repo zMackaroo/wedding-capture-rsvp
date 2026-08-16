@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream'
 import { google } from 'googleapis'
+import { isAllowedMedia, mediaKind } from './media.js'
 
 export class DriveConfigError extends Error {
   constructor(message = 'Google Drive is not configured') {
@@ -111,8 +112,12 @@ function safeFileName(originalName, mimeType) {
       'image/heic': '.heic',
       'image/heif': '.heif',
       'image/gif': '.gif',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'video/webm': '.webm',
+      'video/3gpp': '.3gp',
     }[mimeType] ||
-    '.jpg'
+    (mimeType.startsWith('video/') ? '.mp4' : '.jpg')
   const base =
     originalName
       .replace(/\.[^/.]+$/, '')
@@ -121,15 +126,24 @@ function safeFileName(originalName, mimeType) {
   return `${Date.now()}-${base}${ext}`
 }
 
-export function isAllowedImage(mimeType) {
-  return mimeType.startsWith('image/')
+function toPublicPhoto(file) {
+  const mimeType = file.mimeType ?? 'image/jpeg'
+  const kind = mediaKind(mimeType, file.name) ?? 'image'
+  return {
+    id: file.id,
+    name: file.name ?? (kind === 'video' ? 'video' : 'photo'),
+    url: `/api/photos/${file.id}`,
+    createdAt: file.createdTime ?? null,
+    mimeType,
+    kind,
+  }
 }
 
 export async function listPhotos() {
   const { drive, folderId } = getClient()
   const result = await drive.files.list({
-    q: `'${escapeQuery(folderId)}' in parents and mimeType contains 'image/' and trashed = false`,
-    fields: 'files(id, name, createdTime)',
+    q: `'${escapeQuery(folderId)}' in parents and (mimeType contains 'image/' or mimeType contains 'video/') and trashed = false`,
+    fields: 'files(id, name, createdTime, mimeType)',
     orderBy: 'createdTime desc',
     pageSize: 200,
     supportsAllDrives: true,
@@ -137,21 +151,14 @@ export async function listPhotos() {
   })
 
   return (result.data.files ?? []).flatMap((file) => {
-    if (!file.id) return []
-    return [
-      {
-        id: file.id,
-        name: file.name ?? 'photo',
-        url: `/api/photos/${file.id}`,
-        createdAt: file.createdTime ?? null,
-      },
-    ]
+    if (!file.id || !isAllowedMedia(file.mimeType, file.name)) return []
+    return [toPublicPhoto(file)]
   })
 }
 
 export async function uploadPhoto(file) {
-  if (!isAllowedImage(file.mimetype)) {
-    throw new Error('Only image files can be uploaded')
+  if (!isAllowedMedia(file.mimetype, file.originalname)) {
+    throw new Error('Only photos and videos can be uploaded')
   }
 
   const { drive, folderId } = getClient()
@@ -164,18 +171,13 @@ export async function uploadPhoto(file) {
       mimeType: file.mimetype,
       body: Readable.from(file.buffer),
     },
-    fields: 'id, name, createdTime',
+    fields: 'id, name, createdTime, mimeType',
     supportsAllDrives: true,
   })
 
   if (!created.data.id) throw new Error('Drive did not return a file id')
 
-  return {
-    id: created.data.id,
-    name: created.data.name ?? 'photo',
-    url: `/api/photos/${created.data.id}`,
-    createdAt: created.data.createdTime ?? null,
-  }
+  return toPublicPhoto(created.data)
 }
 
 export async function getPhotoStream(id) {
@@ -191,7 +193,7 @@ export async function getPhotoStream(id) {
   if (
     meta.data.trashed ||
     !meta.data.parents?.includes(folderId) ||
-    !meta.data.mimeType?.startsWith('image/')
+    !isAllowedMedia(meta.data.mimeType, meta.data.name)
   ) {
     return null
   }
